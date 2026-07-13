@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import os
 import socket
 import tempfile
 from pathlib import Path
@@ -8,6 +9,14 @@ from crypto import Identity
 from network import P2PNode
 from cli import run_cli
 from logo import print_logo
+
+
+def _clear_terminal() -> None:
+    """Clear the terminal before showing the startup banner."""
+    if os.name == "nt":
+        os.system("cls")
+    else:
+        os.system("clear")
 
 
 def find_free_port(preferred: int = 12345, attempts: int = 10) -> int:
@@ -106,6 +115,7 @@ async def run(args):
         ephemeral=args.ephemeral,
     )
 
+    _clear_terminal()
     print_logo()
     await node.start()
     print(f"Listening on {args.host}:{args.port}")

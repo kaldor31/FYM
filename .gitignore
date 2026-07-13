@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Data and runtime artifacts
+data/
+*.key
+*.log
+
+# IDE and OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Test / ephemeral temp dirs
+pfs_ephemeral_*/
+fym_ephemeral_*/

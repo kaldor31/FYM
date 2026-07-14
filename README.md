@@ -119,7 +119,6 @@ Connect manually inside the CLI:
 > /chat bob
 [chat] entered chat with bob (type /back to return)
 > hello
-> hello
 > /back
 [chat] returned to normal mode
 ```

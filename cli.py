@@ -14,6 +14,7 @@ Commands:
   /connect host:port|id    — connect to a peer by address or peer_id
   /msg <id|nick|room> <text> — send a direct message or to a room (by name or id)
   /chat <id|nick|room|room_name> — enter clean chat mode with a peer or room
+  /back                    — return from clean chat mode to normal mode
   /room create [name]      — create a group chat room
   /room add <room_id|name> <peer_id|nick> — add a peer to a room and notify them
   /room msg <room_id|name> <text> — send a message to a room
@@ -55,7 +56,6 @@ async def _send_chat_line(node: P2PNode, state: ChatState, text: str) -> None:
             await node.send_room_message(state.target, text)
         else:
             await node.send_message(state.target, text)
-        print(f"> {text}")
     except Exception as exc:
         print(f"! {exc}")
 

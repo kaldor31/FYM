@@ -361,6 +361,7 @@ class P2PNode:
                 handshake_initiate(reader, writer, self.identity, ephemeral), timeout=10.0
             )
             self._promote_contact(remote_id)
+            self.contacts.add_route(remote_id, address)
 
             session = Session(reader, writer, remote_id, cipher, address, is_initiator=True)
             # If an inbound session already exists, prefer the first one.
@@ -385,6 +386,13 @@ class P2PNode:
         if target_id in self.sessions:
             return target_id
         addr = self.contacts.get_address(target_id)
+        # Fallback: look for a route/contact stored under a short or prefix id.
+        if not addr:
+            for pid in list(self.contacts.routes.keys()) + list(self.contacts.contacts.keys()):
+                if target_id.startswith(pid) or pid.startswith(target_id):
+                    addr = self.contacts.get_address(pid)
+                    if addr:
+                        break
         if not addr and self.dht:
             try:
                 addr = await asyncio.wait_for(self.dht.get(target_id), timeout=5.0)

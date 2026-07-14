@@ -7,7 +7,7 @@ ifaddr==0.2.0
 kademlia==2.2.3
 lxml==6.1.1
 prompt_toolkit==3.0.52
-pycparser==3.0
+pycparser==2.23
 python-dateutil==2.9.0.post0
 requests==2.34.2
 rpcudp==5.0.1

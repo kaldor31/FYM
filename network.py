@@ -68,8 +68,12 @@ class Contacts:
     def _save_json(self, path: Path, data: dict) -> None:
         if self.memory_only:
             return
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
+        try:
+            with open(path, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            # Don't let a disk write failure crash the network session.
+            pass
 
     def add(self, peer_id: str, nickname: str, address: Optional[str] = None) -> None:
         self.contacts[peer_id] = {"nickname": nickname, "address": address}
@@ -97,6 +101,11 @@ class Contacts:
     def add_route(self, peer_id: str, address: str) -> None:
         self.routes[peer_id] = address
         self._save_json(self.routes_path, self.routes)
+
+    def remove(self, peer_id: str) -> None:
+        self.contacts.pop(peer_id, None)
+        self.routes.pop(peer_id, None)
+        self._save_all()
 
     def _save_all(self) -> None:
         self._save_json(self.contacts_path, self.contacts)
@@ -199,6 +208,7 @@ class P2PNode:
         self.dht_port = dht_port
         self.dht_bootstrap = dht_bootstrap or []
         self.sessions: Dict[str, Session] = {}
+        self.pending_sessions: Dict[str, Session] = {}
         self.rooms: Dict[str, ChatRoom] = {}
         self.contacts = Contacts(data_dir, memory_only=ephemeral)
         self.inbox: asyncio.Queue = asyncio.Queue()
@@ -214,6 +224,8 @@ class P2PNode:
     async def start(self) -> None:
         self._running = True
         self.server = await asyncio.start_server(self._accept, self.host, self.port)
+        if self.server.sockets:
+            self.port = self.server.sockets[0].getsockname()[1]
         if self.upnp:
             await self._try_upnp()
         if self.relay_address:
@@ -320,11 +332,12 @@ class P2PNode:
             await self.inbox.put({"type": "error", "message": f"handshake from {address}: {exc}"})
             return
 
+        if remote_id == self.identity.id:
+            writer.close()
+            await writer.wait_closed()
+            return
         session = Session(reader, writer, remote_id, cipher, address, is_initiator=False)
         self._promote_contact(remote_id)
-        self.sessions[remote_id] = session
-        await self.inbox.put({"type": "connected", "peer_id": remote_id, "address": address})
-        await self._post_handshake(session)
         task = asyncio.create_task(self._receive_loop(session))
         self._receive_tasks.add(task)
         task.add_done_callback(self._receive_tasks.discard)
@@ -353,6 +366,9 @@ class P2PNode:
 
             host, port = address.rsplit(":", 1)
             port = int(port)
+            if host == "0.0.0.0":
+                host = "127.0.0.1"
+            address = f"{host}:{port}"
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port), timeout=5.0
             )
@@ -360,20 +376,26 @@ class P2PNode:
             remote_id, cipher = await asyncio.wait_for(
                 handshake_initiate(reader, writer, self.identity, ephemeral), timeout=10.0
             )
+            if remote_id == self.identity.id:
+                writer.close()
+                await writer.wait_closed()
+                await self.inbox.put({"type": "error", "message": "cannot connect to own identity"})
+                return None
             self._promote_contact(remote_id)
-            self.contacts.add_route(remote_id, address)
 
             session = Session(reader, writer, remote_id, cipher, address, is_initiator=True)
-            # If an inbound session already exists, prefer the first one.
             if remote_id in self.sessions:
                 session.close()
-            else:
-                self.sessions[remote_id] = session
-                await self.inbox.put({"type": "connected", "peer_id": remote_id, "address": address})
-                await self._post_handshake(session)
-                task = asyncio.create_task(self._receive_loop(session))
-                self._receive_tasks.add(task)
-                task.add_done_callback(self._receive_tasks.discard)
+                return remote_id
+            if remote_id in self.pending_sessions:
+                old = self.pending_sessions.pop(remote_id)
+                old.close()
+            self.pending_sessions[remote_id] = session
+            await session.send({"type": "connect_request"})
+            await self.inbox.put({"type": "info", "message": f"connect request sent to {remote_id[:16]}"})
+            task = asyncio.create_task(self._receive_loop(session))
+            self._receive_tasks.add(task)
+            task.add_done_callback(self._receive_tasks.discard)
             return remote_id
         except Exception as exc:
             await self.inbox.put({"type": "error", "message": f"connect to {address}: {exc}"})
@@ -407,15 +429,14 @@ class P2PNode:
 
     async def _post_handshake(self, session: Session) -> None:
         """Send peer list to help decentralized discovery."""
-        peers = []
+        peers = [{"id": self.identity.id, "address": self._dht_address()}]
         for pid, sess in self.sessions.items():
-            if sess.is_initiator and sess.address:
+            if sess.is_initiator and sess.address and pid != self.identity.id and pid != session.remote_id:
                 peers.append({"id": pid, "address": sess.address})
-        if peers:
-            try:
-                await session.send({"type": "peer_list", "peers": peers})
-            except Exception:
-                pass
+        try:
+            await session.send({"type": "peer_list", "peers": peers})
+        except Exception:
+            pass
 
     async def _receive_loop(self, session: Session) -> None:
         try:
@@ -429,10 +450,13 @@ class P2PNode:
         except asyncio.IncompleteReadError:
             pass
         except Exception as exc:
-            await self.inbox.put({"type": "error", "message": f"peer {session.remote_id[:16]}: {exc}"})
+            import traceback
+            tb = traceback.format_exc()
+            await self.inbox.put({"type": "error", "message": f"peer {session.remote_id[:16]}: {exc}\n{tb}"})
         finally:
             session.close()
             self.sessions.pop(session.remote_id, None)
+            self.pending_sessions.pop(session.remote_id, None)
             await self.inbox.put({"type": "disconnected", "peer_id": session.remote_id})
 
     async def _handle_payload(self, session: Session, payload: dict) -> None:
@@ -481,6 +505,44 @@ class P2PNode:
                     "room_name": room_name,
                     "from": session.remote_id,
                 })
+        elif t == "room_leave":
+            room_id = payload.get("room_id")
+            if room_id:
+                room_name = payload.get("room_name") or room_id[:8]
+                if room_id in self.rooms:
+                    self.rooms[room_id].remove(session.remote_id)
+                    if not self.rooms[room_id].members:
+                        del self.rooms[room_id]
+                await self.inbox.put({
+                    "type": "room_leave",
+                    "room_id": room_id,
+                    "room_name": room_name,
+                    "from": session.remote_id,
+                })
+        elif t == "connect_request":
+            if session.remote_id in self.sessions:
+                session.close()
+                return
+            old = self.pending_sessions.pop(session.remote_id, None)
+            if old and old is not session:
+                old.close()
+            self.pending_sessions[session.remote_id] = session
+            await self.inbox.put({
+                "type": "connect_request",
+                "peer_id": session.remote_id,
+                "address": session.address,
+                "nickname": self.get_nickname(session.remote_id),
+            })
+        elif t == "connect_accept":
+            self.pending_sessions.pop(session.remote_id, None)
+            self.sessions[session.remote_id] = session
+            self.contacts.add_route(session.remote_id, session.address)
+            await self.inbox.put({"type": "connected", "peer_id": session.remote_id, "address": session.address})
+            await self._post_handshake(session)
+        elif t == "connect_decline":
+            self.pending_sessions.pop(session.remote_id, None)
+            await self.inbox.put({"type": "info", "message": f"connect request declined by {session.remote_id[:16]}"})
+            session.close()
         elif t == "peer_list":
             for peer in payload.get("peers", []):
                 pid = peer.get("id")
@@ -540,9 +602,11 @@ class P2PNode:
         return msg["id"]
 
     def create_room(self, name: str = "") -> str:
-        """Create a new in-memory group chat room."""
+        """Create a new in-memory group chat room and add the creator."""
         room_id = uuid.uuid4().hex
-        self.rooms[room_id] = ChatRoom(room_id, name=name)
+        room = ChatRoom(room_id, name=name)
+        room.add(self.identity.id)
+        self.rooms[room_id] = room
         return room_id
 
     def resolve_room(self, key: str) -> str:
@@ -665,6 +729,8 @@ class P2PNode:
         # Exact session id (full).
         if key in self.sessions:
             return key
+        if key in self.pending_sessions:
+            return key
         # Exact contact key: if we now have the full id in a session, promote it.
         if key in self.contacts.contacts:
             full = self._expand_id(key)
@@ -686,9 +752,9 @@ class P2PNode:
                 if key.startswith(pid) and len(pid) < len(key):
                     self.contacts.promote(pid, key)
                     return key
-        # Prefix of a session id or contact id.
+        # Prefix of a session, pending session or contact id.
         candidates = []
-        for pid in list(self.sessions.keys()) + list(self.contacts.contacts.keys()):
+        for pid in list(self.sessions.keys()) + list(self.pending_sessions.keys()) + list(self.contacts.contacts.keys()):
             if pid.startswith(key):
                 candidates.append(pid)
         if len(candidates) == 1:
@@ -699,7 +765,7 @@ class P2PNode:
                 return full
             return c
         # If multiple prefix matches, prefer an active session.
-        for pid in self.sessions:
+        for pid in list(self.sessions.keys()) + list(self.pending_sessions.keys()):
             if pid.startswith(key):
                 return pid
         return key
@@ -737,6 +803,69 @@ class P2PNode:
         stored = full or peer_id
         self.contacts.add(stored, nickname, address)
         return stored
+
+    def remove_contact(self, key: str) -> Optional[str]:
+        """Remove a contact by id, nickname or prefix."""
+        removed = None
+        if key in self.contacts.contacts:
+            removed = key
+        else:
+            for pid, info in list(self.contacts.contacts.items()):
+                if info.get("nickname") == key or key.startswith(pid) or pid.startswith(key):
+                    removed = pid
+                    break
+        if removed:
+            self.contacts.remove(removed)
+            return removed
+        return None
+
+    async def room_leave(self, room_id: str) -> None:
+        """Remove the local identity from a room and notify remaining members."""
+        resolved = self.resolve_room(room_id)
+        if resolved not in self.rooms:
+            raise ValueError("room not found")
+        room = self.rooms[resolved]
+        members = list(room.members)
+        room.remove(self.identity.id)
+        if not room.members:
+            del self.rooms[resolved]
+        for peer_id in members:
+            if peer_id == self.identity.id:
+                continue
+            try:
+                resolved_peer = await self._ensure_session(peer_id)
+                if not resolved_peer or resolved_peer not in self.sessions:
+                    continue
+                session = self.sessions[resolved_peer]
+                await session.send({"type": "room_leave", "room_id": resolved, "room_name": room.name})
+            except Exception:
+                pass
+
+    async def accept_connection(self, peer_id: str) -> Optional[str]:
+        """Accept an incoming connection request and move it to active sessions."""
+        resolved = self.resolve_peer(peer_id)
+        if resolved not in self.pending_sessions:
+            raise ValueError(f"no pending connection request for {peer_id[:16]}")
+        session = self.pending_sessions.pop(resolved)
+        self.sessions[resolved] = session
+        self.contacts.add_route(resolved, session.address)
+        await session.send({"type": "connect_accept"})
+        await self.inbox.put({"type": "connected", "peer_id": resolved, "address": session.address})
+        await self._post_handshake(session)
+        return resolved
+
+    async def decline_connection(self, peer_id: str) -> Optional[str]:
+        """Decline an incoming connection request."""
+        resolved = self.resolve_peer(peer_id)
+        session = self.pending_sessions.pop(resolved, None)
+        if not session:
+            raise ValueError(f"no pending connection request for {peer_id[:16]}")
+        try:
+            await session.send({"type": "connect_decline"})
+        except Exception:
+            pass
+        session.close()
+        return resolved
 
     async def invite_to_room(self, room_id: str, peer_id: str) -> None:
         """Notify a peer they were added to a room (group name and id)."""

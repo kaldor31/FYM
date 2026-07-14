@@ -10,6 +10,7 @@ from crypto import Identity
 from network import P2PNode
 from cli import run_cli
 from logo import print_logo
+from nat import get_local_ip
 
 
 def _clear_terminal() -> None:
@@ -133,7 +134,10 @@ async def run(args):
     _clear_terminal()
     print_logo()
     await node.start()
-    print(f"Listening on {args.host}:{args.port}")
+    display_host = node.public_endpoint.split(":")[0] if node.public_endpoint else (args.host if args.host != "0.0.0.0" else get_local_ip())
+    if display_host in ("0.0.0.0", "127.0.0.1") or display_host.startswith("127."):
+        display_host = "127.0.0.1"
+    print(f"Listening on {display_host}:{node.port}")
     print(f"Your fingerprint: {identity.fingerprint}")
     if node.public_endpoint:
         print(f"Public endpoint: {node.public_endpoint}")

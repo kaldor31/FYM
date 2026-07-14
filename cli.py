@@ -11,7 +11,9 @@ from network import P2PNode
 
 HELP_TEXT = """
 Commands:
-  /connect host:port|id    — connect to a peer by address or peer_id
+  /connect host:port|id    — send a connection request to a peer
+  /accept <id|nick>        — accept an incoming connection request
+  /decline <id|nick>       — decline an incoming connection request
   /msg <id|nick|room> <text> — send a direct message or to a room (by name or id)
   /chat <id|nick|room|room_name> — enter clean chat mode with a peer or room
   /back                    — return from clean chat mode to normal mode
@@ -19,7 +21,9 @@ Commands:
   /room add <room_id|name> <peer_id|nick> — add a peer to a room and notify them
   /room msg <room_id|name> <text> — send a message to a room
   /rooms                   — list rooms
+  /leave <room_id|name>    — leave a room
   /add <id|short_id> <nick> [addr] — save a contact (addr is optional; DHT resolves it)
+  /remove <id|nick>        — remove a contact
   /contacts                — list known contacts
   /peers                   — list connected peers
   /help                    — show this help
@@ -35,12 +39,20 @@ class ChatState:
     kind: Optional[str] = None
     name: Optional[str] = None
     pending: list = field(default_factory=list)
+    tasks: set = field(default_factory=set)
 
 
 def _fmt_time(ts: float) -> str:
     if ts is None:
         return ""
     return datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+
+
+def _spawn(state: ChatState, coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    state.tasks.add(task)
+    task.add_done_callback(state.tasks.discard)
+    return task
 
 
 def _display_name(node: P2PNode, peer_id: str) -> str:
@@ -74,19 +86,43 @@ async def process_inbox(node: P2PNode, state: ChatState) -> None:
                     if room_id != state.target:
                         state.pending.append(event)
                         continue
-                    print(f"\n<{_display_name(node, event['from'])}> {event['text']}")
+                    print(f"\n[{_fmt_time(event.get('timestamp'))}] <{_display_name(node, event['from'])}> {event['text']}")
                     continue
                 else:  # peer chat
                     if room_id is not None or event["from"] != state.target:
                         state.pending.append(event)
                         continue
-                    print(f"\n<{_display_name(node, event['from'])}> {event['text']}")
+                    print(f"\n[{_fmt_time(event.get('timestamp'))}] <{_display_name(node, event['from'])}> {event['text']}")
                     continue
+            elif t == "connect_request":
+                peer_id = event["peer_id"]
+                nickname = event.get("nickname") or node.get_nickname(peer_id)
+                name = _display_name(node, peer_id)
+                if nickname:
+                    label = f"{nickname} ({name})"
+                else:
+                    label = name
+                print(f"\n[?] {label} wants to connect from {event['address']}. /accept {peer_id[:16]} or /decline {peer_id[:16]}")
+                continue
             elif t == "connected":
                 print(f"\n[+] connected {_display_name(node, event['peer_id'])}")
                 continue
             elif t == "disconnected":
                 print(f"\n[-] disconnected {_display_name(node, event['peer_id'])}")
+                continue
+            elif t == "error":
+                print(f"\n[!] {event['message']}")
+                continue
+            elif t == "room_leave":
+                room_id = event.get("room_id", "")
+                if state.kind == "room" and room_id == state.target:
+                    name = event.get("room_name", room_id[:8] if room_id else "")
+                    print(f"\n[-] {_display_name(node, event['from'])} left room '{name}' ({room_id[:8]})")
+                else:
+                    state.pending.append(event)
+                continue
+            elif t == "info":
+                print(f"\n[i] {event['message']}")
                 continue
             # all other system events are suppressed in chat mode
             continue
@@ -98,10 +134,23 @@ async def process_inbox(node: P2PNode, state: ChatState) -> None:
                 name = room.name if room else room_id[:8]
                 prefix = f"[{name}] "
             print(f"\n[{_fmt_time(event.get('timestamp'))}] {prefix}<{_display_name(node, event['from'])}> {event['text']}")
+        elif t == "connect_request":
+            peer_id = event["peer_id"]
+            nickname = event.get("nickname") or node.get_nickname(peer_id)
+            name = _display_name(node, peer_id)
+            if nickname:
+                label = f"{nickname} ({name})"
+            else:
+                label = name
+            print(f"\n[?] {label} wants to connect from {event['address']}. /accept {peer_id[:16]} or /decline {peer_id[:16]}")
         elif t == "room_invite":
             room_id = event.get("room_id", "")
             name = event.get("room_name", room_id[:8] if room_id else "")
             print(f"\n[+] you were added to room '{name}' ({room_id[:8]}) by {_display_name(node, event['from'])}")
+        elif t == "room_leave":
+            room_id = event.get("room_id", "")
+            name = event.get("room_name", room_id[:8] if room_id else "")
+            print(f"\n[-] {_display_name(node, event['from'])} left room '{name}' ({room_id[:8]})")
         elif t == "connected":
             print(f"\n[+] connected {_display_name(node, event['peer_id'])} @ {event['address']}")
         elif t == "disconnected":
@@ -158,7 +207,7 @@ async def handle_command(node: P2PNode, line: str, state: ChatState) -> None:
         if len(parts) < 2:
             print("Usage: /connect host:port|peer_id")
             return
-        asyncio.create_task(node.connect(parts[1]))
+        _spawn(state, node.connect(parts[1]))
 
     elif cmd == "/msg":
         if len(parts) < 3:
@@ -183,7 +232,7 @@ async def handle_command(node: P2PNode, line: str, state: ChatState) -> None:
             except Exception as exc:
                 print(f"[!] send failed: {exc}")
 
-        asyncio.create_task(_send())
+        _spawn(state, _send())
 
     elif cmd == "/add":
         tokens = line.split()
@@ -195,6 +244,63 @@ async def handle_command(node: P2PNode, line: str, state: ChatState) -> None:
         address = tokens[3] if len(tokens) > 3 else None
         stored = node.add_contact(peer_id, nickname, address)
         print(f"[+] added {nickname} {stored[:16]} {address or ''}")
+
+    elif cmd == "/remove":
+        tokens = line.split()
+        if len(tokens) < 2:
+            print("Usage: /remove <peer_id|nickname|fingerprint>")
+            return
+        target = tokens[1]
+        removed = node.remove_contact(target)
+        if removed:
+            print(f"[+] removed {_display_name(node, removed)}")
+        else:
+            print("[!] contact not found")
+
+    elif cmd == "/leave":
+        if len(parts) < 2:
+            print("Usage: /leave <room_id|room_name>")
+            return
+        target = parts[1]
+
+        async def _leave():
+            try:
+                await node.room_leave(target)
+                print(f"[+] left room {target}")
+            except Exception as exc:
+                print(f"[!] {exc}")
+
+        _spawn(state, _leave())
+
+    elif cmd == "/accept":
+        if len(parts) < 2:
+            print("Usage: /accept <peer_id|nickname|fingerprint>")
+            return
+        target = parts[1]
+
+        async def _accept():
+            try:
+                resolved = await node.accept_connection(target)
+                print(f"[+] accepted {_display_name(node, resolved)}")
+            except Exception as exc:
+                print(f"[!] {exc}")
+
+        _spawn(state, _accept())
+
+    elif cmd == "/decline":
+        if len(parts) < 2:
+            print("Usage: /decline <peer_id|nickname|fingerprint>")
+            return
+        target = parts[1]
+
+        async def _decline():
+            try:
+                resolved = await node.decline_connection(target)
+                print(f"[+] declined {_display_name(node, resolved)}")
+            except Exception as exc:
+                print(f"[!] {exc}")
+
+        _spawn(state, _decline())
 
     elif cmd == "/room":
         tokens = line.split(maxsplit=3)
@@ -225,7 +331,7 @@ async def handle_command(node: P2PNode, line: str, state: ChatState) -> None:
                 except Exception as exc:
                     print(f"[!] {exc}")
 
-            asyncio.create_task(_invite_and_add())
+            _spawn(state, _invite_and_add())
         elif sub == "msg":
             if len(tokens) < 4:
                 print("Usage: /room msg <room_id|room_name> <text>")
@@ -242,7 +348,7 @@ async def handle_command(node: P2PNode, line: str, state: ChatState) -> None:
                 except Exception as exc:
                     print(f"[!] room send failed: {exc}")
 
-            asyncio.create_task(_send_room(resolved_room, text))
+            _spawn(state, _send_room(resolved_room, text))
         else:
             print("Unknown /room subcommand")
 
@@ -283,7 +389,7 @@ async def run_cli(node: P2PNode) -> None:
     print(f"Your fingerprint: {node.identity.fingerprint}")
 
     with patch_stdout():
-        inbox_task = asyncio.create_task(process_inbox(node, state))
+        inbox_task = _spawn(state, process_inbox(node, state))
         try:
             while True:
                 try:
@@ -301,7 +407,9 @@ async def run_cli(node: P2PNode) -> None:
                     if state.active:
                         if line.startswith("/"):
                             cmd = line.split()[0].lower()
-                            if cmd == "/back":
+                            if cmd in ("/accept", "/decline"):
+                                await handle_command(node, line, state)
+                            elif cmd == "/back":
                                 state.active = False
                                 print("[chat] returned to normal mode")
                                 node.inbox.put_nowait({"type": "noop"})
@@ -312,7 +420,7 @@ async def run_cli(node: P2PNode) -> None:
                             else:
                                 print("Use /back to return")
                         else:
-                            asyncio.create_task(_send_chat_line(node, state, line))
+                            _spawn(state, _send_chat_line(node, state, line))
                     else:
                         await handle_command(node, line, state)
                 except SystemExit:

@@ -97,7 +97,9 @@ Connect manually inside the CLI:
 
 ## Commands
 
-- `/connect host:port|peer_id` — connect to a peer by address or `peer_id` via DHT.
+- `/connect host:port|peer_id` — send a connection request to a peer by address or `peer_id`.
+- `/accept <id|nickname|fingerprint>` — accept an incoming connection request.
+- `/decline <id|nickname|fingerprint>` — decline an incoming connection request.
 - `/msg <id|nickname|room_id|room_name> <text>` — send a direct message or a room message.
 - `/chat <id|nickname|room_id|room_name>` — enter clean chat mode with a peer or room.
 - `/back` — leave clean chat mode and return to the normal command menu.
@@ -105,7 +107,9 @@ Connect manually inside the CLI:
 - `/room add <room_id|room_name> <peer_id|nickname>` — add a peer to a room.
 - `/room msg <room_id|room_name> <text>` — send a message to a room.
 - `/rooms` — list rooms.
+- `/leave <room_id|room_name>` — leave a room.
 - `/add <peer_id|short_id> <nickname> [address]` — save a contact (address is optional; DHT resolves it).
+- `/remove <id|nickname|fingerprint>` — remove a contact.
 - `/contacts` — list known contacts.
 - `/peers` — list connected peers.
 - `/help` — show help.
@@ -125,25 +129,40 @@ Connect manually inside the CLI:
 
 While in chat mode:
 - type text and press Enter to send it directly (no `/msg` or `/room msg` prefix);
-- only messages for the active peer/room, plus `connected`/`disconnected` events, are shown;
+- messages are shown with a timestamp: `[18:12:21] <nickname> text`;
+- only messages for the active peer/room, plus `connected`/`disconnected` events, room join/leave notifications, and incoming connection requests, are shown;
+- you can still answer connection requests with `/accept` or `/decline`;
 - other system notifications are suppressed until you type `/back`;
 - `/quit` or `/exit` still works to leave the application.
 
 ## Example Chat
 
-```
-> /connect 127.0.0.1:12345
-[+] connected bob @ 127.0.0.1:12345
+Bob starts the node and Alice sends him a connection request:
 
+```
+# Alice
+> /connect 127.0.0.1:12345
+[i] connect request sent to BobFingerprint
+```
+
+On Bob's side:
+
+```
+[?] AliceFingerprint wants to connect from 127.0.0.1:52648. /accept AliceFingerprint or /decline AliceFingerprint
+> /accept AliceFingerprint
+[+] connected AliceFingerprint
+```
+
+After saving a contact, the nickname is shown everywhere:
+
+```
 > /add <bob_fingerprint> bob
 > /msg bob hello
 [you -> bob] hello
 
 # On the peer side:
-[12:34:56] <alice> hello
+[18:12:21] <alice> hello
 ```
-
-If a contact is saved with `/add`, the nickname is shown everywhere instead of the short id.
 
 ## Decentralized Discovery (Kademlia DHT)
 
@@ -160,9 +179,16 @@ python run.py --name bob --dht-port 13346 --dht-bootstrap 127.0.0.1:13345
 Inside the CLI:
 
 ```
-> /msg <alice_fingerprint> hello
-# or
 > /connect <alice_fingerprint>
+[i] connect request sent to <alice_fingerprint>
+
+# On Alice's side:
+[?] <bob_fingerprint> wants to connect from ... /accept <bob_fingerprint> or /decline ...
+> /accept <bob_fingerprint>
+[+] connected <bob_fingerprint>
+
+# Now messaging works:
+> /msg <bob_fingerprint> hello
 ```
 
 ## Ephemeral Mode
@@ -192,9 +218,18 @@ Rooms are created in memory locally. Messages are fanned out pairwise to each me
 # or /room add myteam <nickname> if the contact was saved with /add
 
 > /room msg myteam hello everyone
+
+> /leave myteam
+[+] left room myteam
 ```
 
 When a group message is received, the room and its member list are automatically created/updated on the recipient side.
+
+When a member leaves a room, the remaining members receive a notification:
+
+```
+[-] bob left room 'myteam' (aa02957b)
+```
 
 ## Running Over the Internet
 

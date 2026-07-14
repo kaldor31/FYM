@@ -98,29 +98,53 @@ Connect manually inside the CLI:
 ## Commands
 
 - `/connect host:port|peer_id` — connect to a peer by address or `peer_id` via DHT.
-- `/msg <id|nickname|room_id> <text>` — send a direct message or a room message.
+- `/msg <id|nickname|room_id|room_name> <text>` — send a direct message or a room message.
+- `/chat <id|nickname|room_id|room_name>` — enter clean chat mode with a peer or room.
+- `/back` — leave clean chat mode and return to the normal command menu.
 - `/room create [name]` — create a group chat room.
-- `/room add <room_id> <peer_id|nickname>` — add a peer to a room.
-- `/room msg <room_id> <text>` — send a message to a room.
+- `/room add <room_id|room_name> <peer_id|nickname>` — add a peer to a room.
+- `/room msg <room_id|room_name> <text>` — send a message to a room.
 - `/rooms` — list rooms.
-- `/add <peer_id> <nickname> [address]` — save a contact (address is optional; DHT resolves it).
+- `/add <peer_id|short_id> <nickname> [address]` — save a contact (address is optional; DHT resolves it).
 - `/contacts` — list known contacts.
 - `/peers` — list connected peers.
 - `/help` — show help.
-- `/quit` — exit.
+- `/quit` or `/exit` — exit the application.
+
+## Clean Chat Mode
+
+`/chat` gives you a vim-like, distraction-free view for a single peer or room.
+
+```
+> /chat bob
+[chat] entered chat with bob (type /back to return)
+> hello
+> hello
+> /back
+[chat] returned to normal mode
+```
+
+While in chat mode:
+- type text and press Enter to send it directly (no `/msg` or `/room msg` prefix);
+- only messages for the active peer/room, plus `connected`/`disconnected` events, are shown;
+- other system notifications are suppressed until you type `/back`;
+- `/quit` or `/exit` still works to leave the application.
 
 ## Example Chat
 
 ```
 > /connect 127.0.0.1:12345
-[+] connected <...> @ 127.0.0.1:12345
+[+] connected bob @ 127.0.0.1:12345
 
-> /msg <alice_fingerprint> hello
-[you -> <...>] hello
+> /add <bob_fingerprint> bob
+> /msg bob hello
+[you -> bob] hello
 
 # On the peer side:
-[12:34:56] <bob_fingerprint> hello
+[12:34:56] <alice> hello
 ```
+
+If a contact is saved with `/add`, the nickname is shown everywhere instead of the short id.
 
 ## Decentralized Discovery (Kademlia DHT)
 
@@ -153,7 +177,8 @@ python run.py --ephemeral --dht-port 13345
 In this mode:
 - A fresh identity is generated and not reused across runs.
 - Contacts and routes are kept in memory only.
-- On exit (`/quit` or Ctrl-C) the Double Ratchet keys are cleared, the inbox is drained, and the temporary data directory is removed.
+- On exit (`/quit` or `/exit`) the Double Ratchet keys are cleared, the inbox is drained, and the temporary data directory is removed.
+- `Ctrl+C` does **not** exit the app; use `/quit` or `/exit`.
 
 ## Group Chats
 
@@ -163,11 +188,11 @@ Rooms are created in memory locally. Messages are fanned out pairwise to each me
 > /room create myteam
 [+] room created aa02957b (full id: aa02957b...)
 
-> /room add <room_id> <bob_fingerprint>
-> /room add <room_id> <charlie_fingerprint>
-# or /room add <room_id> <nickname> if the contact was saved with /add
+> /room add myteam <bob_fingerprint>
+> /room add myteam <charlie_fingerprint>
+# or /room add myteam <nickname> if the contact was saved with /add
 
-> /room msg <room_id> hello everyone
+> /room msg myteam hello everyone
 ```
 
 When a group message is received, the room and its member list are automatically created/updated on the recipient side.
@@ -210,6 +235,13 @@ Then Bob can message Alice by fingerprint:
 
 The relay only sees encrypted packets — it cannot decrypt messages.
 
+## Terminal Behavior
+
+FYM uses the terminal's **alternate screen** (the same mechanism as `vim`/`nano`). While the app is running:
+- the previous terminal scrollback is hidden and cannot be swiped back to;
+- `Ctrl+C` and `Ctrl+D` are ignored by the CLI — you must type `/quit` or `/exit` to return to the normal terminal buffer;
+- on exit the alternate screen is restored and the original terminal content reappears.
+
 ## Project Structure
 
 ```
@@ -226,5 +258,6 @@ The relay only sees encrypted packets — it cannot decrypt messages.
 ├── nat.py               # UPnP helpers
 ├── logo.py              # ASCII art banner
 ├── requirements.txt     # Full pinned dependencies
-└── .gitignore           # Git ignore rules
+├── .gitignore           # Git ignore rules
+└── LICENSE              # Project license
 ```

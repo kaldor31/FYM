@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import os
 import socket
+import sys
 import tempfile
 from pathlib import Path
 
@@ -16,7 +17,20 @@ def _clear_terminal() -> None:
     if os.name == "nt":
         os.system("cls")
     else:
-        os.system("clear")
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
+
+
+def _enter_alternate_screen() -> None:
+    """Switch to the terminal alternate screen (vim-like, no scrollback)."""
+    sys.stdout.write("\033[?1049h\033[H")
+    sys.stdout.flush()
+
+
+def _exit_alternate_screen() -> None:
+    """Restore the terminal normal screen."""
+    sys.stdout.write("\033[?1049l")
+    sys.stdout.flush()
 
 
 def find_free_port(preferred: int = 12345, attempts: int = 10) -> int:
@@ -115,6 +129,7 @@ async def run(args):
         ephemeral=args.ephemeral,
     )
 
+    _enter_alternate_screen()
     _clear_terminal()
     print_logo()
     await node.start()
@@ -129,6 +144,7 @@ async def run(args):
         await run_cli(node)
     finally:
         await node.stop()
+        _exit_alternate_screen()
 
 
 if __name__ == "__main__":
